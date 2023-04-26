@@ -1,0 +1,18 @@
+[package]
+name = "lab2-1"
+version = "0.1.0"
+edition = "2021"
+
+
+[[bin]]
+name = "producer"
+path = "src/producer.rs"
+
+[[bin]]
+name = "consumer"
+path = "src/consumer.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+fcntl = "0.1.0"

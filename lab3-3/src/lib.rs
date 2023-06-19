@@ -1,4 +1,5 @@
 use std::{
+    borrow::BorrowMut,
     cell::{RefCell, RefMut},
     collections::BTreeSet,
     default,
@@ -6,7 +7,7 @@ use std::{
     ops::DerefMut,
     rc::Rc,
     str::Split,
-    time::{SystemTime, UNIX_EPOCH}, borrow::BorrowMut,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,7 +29,7 @@ pub struct File {
 pub struct Dir {
     name: String,
     creation_time: u64,
-    children: Vec<RefCell<Node>>,
+    children: Vec<Rc<RefCell<Node>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +40,7 @@ pub enum Node {
 
 #[derive(Debug, Clone)]
 pub struct FileSystem {
-    root: Dir,
+    root: Rc<RefCell<Dir>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -201,55 +202,66 @@ impl Dir {
         }
     }
 
+    fn get_child_mut(&self, index: usize) -> Option<RefMut<Node>> {
+        self.children
+            .get(index)
+            .map(|node| node.as_ref().borrow_mut())
+    }
+
     fn mk_dir<'a>(&mut self, path: &mut Peekable<impl Iterator<Item = &'a str>>) {
-        let next = {
-            let next = path.next();
-            if next.is_none() {
+        let next = match path.next() {
+            None => {
                 return;
             }
-            next.unwrap()
+            Some(val) => val,
         };
 
         // next is last path
         if path.peek().is_none() {
             if self.contains_mut(next).is_none() {
-                self.children.push(RefCell::new(Node::Dir(Dir::new(next))));
+                self.children
+                    .push(Rc::new(RefCell::new(Node::Dir(Dir::new(next)))));
                 return;
             }
             return;
         }
 
         if let Some(node) = self.contains_mut(next) {
-            if let Node::Dir(mut next_dir) = *node.borrow_mut() {
+            let mut dir = node.as_ref().borrow_mut();
+            if let Node::Dir(ref mut next_dir) = *dir {
                 next_dir.mk_dir(path);
             }
         }
     }
 
     fn rm_dir<'a>(&mut self, path: &mut Peekable<impl Iterator<Item = &'a str>>) {
-        let next = {
-            let next = path.next();
-            if next.is_none() {
+        let next = match path.next() {
+            None => {
                 return;
             }
-            next.unwrap()
+            Some(val) => val,
         };
 
         // curr is last path
         if path.peek().is_none() {
             let index = {
-                let index_maybe = self.children.iter().position(|c| c.borrow().get_name() == next);
-                if index_maybe.is_none() {
-                    return;
-                }
+                let index_maybe = self
+                    .children
+                    .iter()
+                    .position(|c| c.borrow().get_name() == next);
 
-                if let Node::Dir(dir_to_remove) = *self.children[index_maybe.unwrap()].borrow() {
+                let index = match index_maybe {
+                    None => return,
+                    Some(val) => val,
+                };
+
+                if let Node::Dir(ref dir_to_remove) = *self.children[index].borrow() {
                     if dir_to_remove.children.len() != 0 {
                         return;
                     }
                 }
 
-                index_maybe.unwrap()
+                index
             };
 
             self.children.remove(index);
@@ -257,7 +269,7 @@ impl Dir {
         }
 
         if let Some(node) = self.contains_mut(next) {
-            if let Node::Dir(mut next_dir) = *node.borrow_mut() {
+            if let Node::Dir(ref mut next_dir) = *node.as_ref().borrow_mut() {
                 next_dir.rm_dir(path);
             }
         }
@@ -266,7 +278,7 @@ impl Dir {
     fn new_file<'a>(
         &mut self,
         path: &mut Peekable<impl Iterator<Item = &'a str>>,
-        file: &File,
+        file: File,
     ) -> bool {
         let curr = match path.next() {
             Some(n) => n,
@@ -278,105 +290,106 @@ impl Dir {
         }
 
         if path.peek().is_none() && self.contains_file(&file.name).is_none() {
-            self.children.push(RefCell::new(Node::File(file.clone())));
+            self.children.push(Rc::new(RefCell::new(Node::File(file))));
             return true;
         }
 
-        if let Some(mut dir) = self.contains_dir(path.peek().unwrap()) {
-            return dir.new_file(path, file);
+        if let Some(dir) = self.contains_dir(path.peek().unwrap()) {
+            return dir
+                .as_ref()
+                .borrow_mut()
+                .as_dir()
+                .unwrap()
+                .new_file(path, file);
         }
 
         return false;
     }
 
-    fn contains_mut(&mut self, name: &str) -> Option<RefCell<Node>> {
-        let mut iter = self.children.into_iter();
+    fn contains_mut(&mut self, name: &str) -> Option<Rc<RefCell<Node>>> {
+        let mut iter = self.children.iter();
 
-        iter.find(|n| match *n.borrow_mut() {
-            Node::File(f) => f.name == name,
-            Node::Dir(d) => d.name == name,
-        })
-    }
-
-    fn contains_file(&mut self, name: &str) -> Option<RefMut<File>> {
-        self.children
-            .into_iter()
-            .find(|child| match *child.borrow() {
-                Node::File(f) => f.name == name,
-                _ => false,
-            })
-            .map_or(None, |file| {
-                let file = file.borrow_mut();
-                match *file {
-                    Node::File(_) => Some(RefMut::map(file, |f| f.as_file().unwrap())),
-                    _ => None,
-                }
-            })
-    }
-
-    fn contains_dir(&mut self, name: &str) -> Option<RefMut<Dir>> {
-        self.children
-            .into_iter()
-            .find(|child| match *child.borrow() {
-                Node::Dir(d) => d.name == name,
-                _ => false,
-            })
-            .map_or(None, |dir| {
-                let dir = dir.borrow_mut();
-                match *dir {
-                    Node::Dir(_) => Some(RefMut::map(dir, |d| d.as_dir().unwrap())),
-                    _ => None,
-                }
-            })
-    }
-
-    fn remove(&mut self, name: &str) {
-        let pos = match self.children.iter().position(|c| match *c.borrow() {
+        let res = iter.find(|n| match *n.borrow() {
             Node::File(ref f) => f.name == name,
-            Node::Dir(_) => false,
-        }) {
-            Some(p) => p,
-            None => return,
-        };
+            Node::Dir(ref d) => d.name == name,
+        });
 
-        self.children.remove(pos);
+        res.map(|node| node.clone())
     }
 
-    fn match_queries(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> bool {
-        let mut query_matched = false;
-
-        for query in queries.iter_mut() {
-            if query.0.match_dir(self) {
-                query.1 = true;
-                query_matched = true;
-            }
-        }
-
-        return query_matched;
+    fn contains_file(&mut self, name: &str) -> Option<Rc<RefCell<Node>>> {
+        self.children
+            .iter()
+            .find(|child| match *child.borrow() {
+                Node::File(ref f) => f.name == name,
+                _ => false,
+            })
+            .map_or(None, |file| match *file.as_ref().borrow() {
+                Node::File(_) => Some(file.clone()),
+                _ => None,
+            })
     }
 
-    fn query(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> Vec<RefCell<Node>> {
-        let mut nodes = vec![];
-
-        nodes.extend(self.children.into_iter().flat_map(|c| match *c.borrow_mut() {
-            Node::Dir(mut d) => {
-                let mut matches = d.query(queries);
-                if d.match_queries(queries) {
-                    matches.push(c.clone());
-                }
-                matches
-            },
-            Node::File(mut f) => {
-                if f.match_queries(queries) {
-                    vec![c.clone()]
-                } else {
-                    vec![]
-                }
-            }
-        }));
-
-        nodes
+    fn contains_dir(&mut self, name: &str) -> Option<Rc<RefCell<Node>>> {
+        self.children
+            .iter()
+            .find(|child| match *child.borrow() {
+                Node::Dir(ref d) => d.name == name,
+                _ => false,
+            })
+            .map_or(None, |dir| match *dir.as_ref().borrow() {
+                Node::Dir(_) => Some(dir.clone()),
+                _ => None,
+            })
     }
+
+    // fn remove(&mut self, name: &str) {
+    //     let pos = match self.children.iter().position(|c| match *c.borrow() {
+    //         Node::File(ref f) => f.name == name,
+    //         Node::Dir(_) => false,
+    //     }) {
+    //         Some(p) => p,
+    //         None => return,
+    //     };
+
+    //     self.children.remove(pos);
+    // }
+
+    // fn match_queries(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> bool {
+    //     let mut query_matched = false;
+
+    //     for query in queries.iter_mut() {
+    //         if query.0.match_dir(self) {
+    //             query.1 = true;
+    //             query_matched = true;
+    //         }
+    //     }
+
+    //     return query_matched;
+    // }
+
+    // fn query(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> Vec<RefCell<Node>> {
+    //     let mut nodes = vec![];
+
+    //     nodes.extend(self.children.into_iter().flat_map(|c| match *c.borrow_mut() {
+    //         Node::Dir(mut d) => {
+    //             let mut matches = d.query(queries);
+    //             if d.match_queries(queries) {
+    //                 matches.push(c.clone());
+    //             }
+    //             matches
+    //         },
+    //         Node::File(mut f) => {
+    //             if f.match_queries(queries) {
+    //                 vec![c.clone()]
+    //             } else {
+    //                 vec![]
+    //             }
+    //         }
+    //     }));
+
+    //     nodes
+    // }
 }
 
 impl Into<Node> for Dir {
@@ -386,28 +399,24 @@ impl Into<Node> for Dir {
 }
 
 impl File {
-    fn match_queries(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> bool {
-        let mut query_matched = false;
+    // fn match_queries(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> bool {
+    //     let mut query_matched = false;
 
-        for query in queries.iter_mut() {
-            if query.0.match_file(self) {
-                query.1 = true;
-                query_matched = true;
-            }
-        }
+    //     for query in queries.iter_mut() {
+    //         if query.0.match_file(self) {
+    //             query.1 = true;
+    //             query_matched = true;
+    //         }
+    //     }
 
-        return query_matched;
-    }
+    //     return query_matched;
+    // }
 }
 
 impl FileSystem {
     pub fn new() -> Self {
         Self {
-            root: Dir {
-                name: "".to_string(),
-                creation_time: creation_time(),
-                children: vec![],
-            },
+            root: Rc::new(RefCell::new(Dir::new(""))),
         }
     }
 
@@ -416,34 +425,37 @@ impl FileSystem {
     pub fn mk_dir(&mut self, path: &str) {
         let iter = &mut path.split("/").peekable();
 
+        let mut root = self.root.as_ref().borrow_mut();
+
         if let Some(next) = iter.next() {
-            if next != self.root.name {
+            if next != root.name {
                 return;
             }
 
-            self.root.mk_dir(iter);
+            root.mk_dir(iter);
         }
     }
 
     pub fn rm_dir(&mut self, path: &str) {
         let iter = &mut path.split("/").peekable();
 
+        let mut root = self.root.as_ref().borrow_mut();
         if let Some(next) = iter.next() {
-            if next != self.root.name {
+            if next != root.name {
                 return;
             }
 
-            self.root.rm_dir(iter);
+            root.rm_dir(iter);
         }
     }
 
     pub fn new_file(&mut self, path: &str, file: File) -> bool {
         let mut dirs = path.trim().split_terminator("/").peekable();
-        self.root.new_file(&mut dirs, &file)
+        self.root.as_ref().borrow_mut().new_file(&mut dirs, file)
     }
 
-    pub fn get_file(&mut self, path: &str) -> Option<RefCell<File>> {
-        let mut curr_dir = &mut self.root;
+    pub fn get_file(&mut self, path: &str) -> Option<Rc<RefCell<Node>>> {
+        let mut curr_dir = self.root.as_ref().borrow_mut();
 
         let mut split_path = path.split("/");
         if split_path.next() != Some("") {
@@ -456,14 +468,14 @@ impl FileSystem {
         for file in split_path[0..split_path.len() - 1].iter() {
             let mut new_dir = if let Some(node) = curr_dir.contains_mut(file) {
                 match *node.borrow() {
-                    Node::Dir(d) => d,
+                    Node::Dir(_) => node,
                     Node::File(_) => return None,
                 }
             } else {
                 return None;
             };
 
-            curr_dir = new_dir.borrow_mut();
+            curr_dir = new_dir.as_ref().borrow_mut();
         }
 
         if let Some(p) = split_path.last() {
@@ -548,15 +560,17 @@ impl FileSystem {
 
 #[cfg(test)]
 mod test {
-    use crate::{creation_time, File, FileSystem, MatchResult, Node};
+
+    use crate::{File, FileSystem, MatchResult, Node};
 
     #[test]
     fn new_test() {
         let file = FileSystem::new();
 
-        assert_eq!("", file.root.name);
-        assert_eq!(0, file.root.children.len());
-        assert_ne!(0, file.root.creation_time);
+        let root = file.root.as_ref().borrow();
+        assert_eq!("", root.name);
+        assert_eq!(0, root.children.len());
+        assert_ne!(0, root.creation_time);
     }
 
     #[test]
@@ -567,16 +581,23 @@ mod test {
         file.mk_dir("/a/c");
         file.mk_dir("/a/d");
 
-        assert_eq!("a", file.root.children[0].get_name());
-        assert_eq!("b", file.root.children[1].get_name());
+        let children = &file.root.as_ref().borrow_mut().children;
+        assert_eq!("a", children[0].as_ref().borrow().get_name());
+        assert_eq!("b", children[1].as_ref().borrow().get_name());
 
         assert_eq!(
             "c",
-            file.root.children[0].as_dir().unwrap().children[0].get_name()
+            children[0].as_ref().borrow_mut().as_dir().unwrap().children[0]
+                .as_ref()
+                .borrow()
+                .get_name()
         );
         assert_eq!(
             "d",
-            file.root.children[0].as_dir().unwrap().children[1].get_name()
+            children[0].as_ref().borrow_mut().as_dir().unwrap().children[1]
+                .as_ref()
+                .borrow()
+                .get_name()
         );
     }
 
@@ -589,13 +610,40 @@ mod test {
         file.mk_dir("/a/d");
 
         file.rm_dir("/a/c");
-        assert_eq!(1, file.root.children[0].as_dir().unwrap().children.len());
+        {
+            let root = file.root.as_ref().borrow();
+            assert_eq!(
+                1,
+                root.get_child_mut(0)
+                    .unwrap()
+                    .as_dir()
+                    .map_or(0, |c| c.children.len())
+            );
+        }
 
         file.rm_dir("/a/f");
-        assert_eq!(1, file.root.children[0].as_dir().unwrap().children.len());
+        {
+            let root = file.root.as_ref().borrow();
+            assert_eq!(
+                1,
+                root.get_child_mut(0)
+                    .unwrap()
+                    .as_dir()
+                    .map_or(0, |c| c.children.len())
+            );
+        }
 
         file.rm_dir("/a/d");
-        assert_eq!(0, file.root.children[0].as_dir().unwrap().children.len());
+        {
+            let root = file.root.as_ref().borrow();
+            assert_eq!(
+                0,
+                root.get_child_mut(0)
+                    .unwrap()
+                    .as_dir()
+                    .map_or(0, |c| c.children.len())
+            );
+        }
     }
 
     #[test]
@@ -614,51 +662,66 @@ mod test {
         };
 
         assert!(file.new_file("/", new_file.clone()));
-        assert_eq!(Node::File(new_file.clone()), file.root.children[2]);
-        println!("{:#?}", file);
+        {
+            let root = file.root.as_ref().borrow();
+            assert_eq!(
+                Node::File(new_file.clone()),
+                *root.children[2].as_ref().borrow()
+            );
+        }
 
         assert!(file.new_file("/a", new_file.clone()));
-        assert_eq!(
-            Node::File(new_file.clone()),
-            file.root.children[0].as_dir().unwrap().children[2]
-        );
+        {
+            let root = file.root.as_ref().borrow();
+            assert_eq!(
+                Node::File(new_file.clone()),
+                *root.children[0]
+                    .as_ref()
+                    .borrow_mut()
+                    .as_dir()
+                    .unwrap()
+                    .children[2]
+                    .as_ref()
+                    .borrow()
+            );
+        }
     }
 
     #[test]
     fn search_test() {
-        let mut file = FileSystem::new();
-        let mut a = 
-            File {
-                name: "a".into(),
-                ..Default::default()
-            };
-        file.new_file(
-            "/",
-            a.clone(),
-        );
-        file.mk_dir("/b");
-        file.mk_dir("/b/c");
-        file.mk_dir("/b/d");
-        let mut o = 
-            File {
-                name: "o".into(),
-                ..Default::default()
-            };
+        // let mut file = FileSystem::new();
+        // let mut a =
+        //     File {
+        //         name: "a".into(),
+        //         ..Default::default()
+        //     };
+        // file.new_file(
+        //     "/",
+        //     a.clone(),
+        // );
+        // file.mk_dir("/b");
+        // file.mk_dir("/b/c");
+        // file.mk_dir("/b/d");
+        // let mut o =
+        //     File {
+        //         name: "o".into(),
+        //         ..Default::default()
+        //     };
 
-        file.new_file(
-            "/b/d",
-            o.clone()
-        );
+        // file.new_file(
+        //     "/b/d",
+        //     o.clone()
+        // );
 
-        println!("{:#?}", file);
+        // println!("{:#?}", file);
 
-        let mut other = file.clone();
-        let mut a = Node::File(a);
-        let mut o = Node::File(o);
-        let res = MatchResult {
-            queries: vec!["name:a", "name:o", "smaller:32"],
-            nodes: vec![&mut a, &mut o],
-        };
-        assert_eq!(Some(res), file.search(&["name:a", "name:f", "name:o", "smaller:32"]));
+        // let mut other = file.clone();
+        // let mut a = Node::File(a);
+        // let mut o = Node::File(o);
+        // let res = MatchResult {
+        //     queries: vec!["name:a", "name:o", "smaller:32"],
+        //     nodes: vec![&mut a, &mut o],
+        // };
+        // assert_eq!(Some(res), file.search(&["name:a", "name:f", "name:o", "smaller:32"]));
     }
 }

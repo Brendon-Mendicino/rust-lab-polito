@@ -1,12 +1,7 @@
 use std::{
-    borrow::BorrowMut,
     cell::{RefCell, RefMut},
-    collections::BTreeSet,
-    default,
     iter::Peekable,
-    ops::DerefMut,
     rc::Rc,
-    str::Split,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -45,8 +40,8 @@ pub struct FileSystem {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct MatchResult<'a> {
-    queries: Vec<&'a str>, // query matchate
-    nodes: Vec<RefCell<Node>>,
+    queries: Vec<&'a str>, // query matchated
+    nodes: Vec<Rc<RefCell<Node>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -343,53 +338,49 @@ impl Dir {
             })
     }
 
-    // fn remove(&mut self, name: &str) {
-    //     let pos = match self.children.iter().position(|c| match *c.borrow() {
-    //         Node::File(ref f) => f.name == name,
-    //         Node::Dir(_) => false,
-    //     }) {
-    //         Some(p) => p,
-    //         None => return,
-    //     };
+    fn remove(&mut self, name: &str) {
+        let pos = match self.children.iter().position(|c| match *c.borrow() {
+            Node::File(ref f) => f.name == name,
+            Node::Dir(_) => false,
+        }) {
+            Some(p) => p,
+            None => return,
+        };
 
-    //     self.children.remove(pos);
-    // }
+        self.children.remove(pos);
+    }
 
-    // fn match_queries(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> bool {
-    //     let mut query_matched = false;
+    fn match_queries(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> bool {
+        let mut query_matched = false;
 
-    //     for query in queries.iter_mut() {
-    //         if query.0.match_dir(self) {
-    //             query.1 = true;
-    //             query_matched = true;
-    //         }
-    //     }
+        for query in queries.iter_mut() {
+            if query.0.match_dir(self) {
+                query.1 = true;
+                query_matched = true;
+            }
+        }
 
-    //     return query_matched;
-    // }
+        return query_matched;
+    }
 
-    // fn query(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> Vec<RefCell<Node>> {
-    //     let mut nodes = vec![];
+    fn query(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> Vec<Rc<RefCell<Node>>> {
+        let mut nodes = vec![];
 
-    //     nodes.extend(self.children.into_iter().flat_map(|c| match *c.borrow_mut() {
-    //         Node::Dir(mut d) => {
-    //             let mut matches = d.query(queries);
-    //             if d.match_queries(queries) {
-    //                 matches.push(c.clone());
-    //             }
-    //             matches
-    //         },
-    //         Node::File(mut f) => {
-    //             if f.match_queries(queries) {
-    //                 vec![c.clone()]
-    //             } else {
-    //                 vec![]
-    //             }
-    //         }
-    //     }));
+        nodes.extend(self.children.iter().flat_map(|c| {
+            let mut matches = vec![];
+            if c.borrow_mut().match_queries(queries) {
+                matches.push(c.clone());
+            }
 
-    //     nodes
-    // }
+            if let Node::Dir(ref mut dir) = *c.borrow_mut() {
+                matches.extend(dir.query(queries));
+            }
+
+            matches
+        }));
+
+        nodes
+    }
 }
 
 impl Into<Node> for Dir {
@@ -399,18 +390,18 @@ impl Into<Node> for Dir {
 }
 
 impl File {
-    // fn match_queries(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> bool {
-    //     let mut query_matched = false;
+    fn match_queries(&mut self, queries: &mut Vec<(QueryParam, bool)>) -> bool {
+        let mut query_matched = false;
 
-    //     for query in queries.iter_mut() {
-    //         if query.0.match_file(self) {
-    //             query.1 = true;
-    //             query_matched = true;
-    //         }
-    //     }
+        for query in queries.iter_mut() {
+            if query.0.match_file(self) {
+                query.1 = true;
+                query_matched = true;
+            }
+        }
 
-    //     return query_matched;
-    // }
+        return query_matched;
+    }
 }
 
 impl FileSystem {
@@ -455,8 +446,6 @@ impl FileSystem {
     }
 
     pub fn get_file(&mut self, path: &str) -> Option<Rc<RefCell<Node>>> {
-        let mut curr_dir = self.root.as_ref().borrow_mut();
-
         let mut split_path = path.split("/");
         if split_path.next() != Some("") {
             return None;
@@ -465,23 +454,41 @@ impl FileSystem {
         // go through all the paths
         let split_path: Vec<&str> = split_path.collect();
 
-        for file in split_path[0..split_path.len() - 1].iter() {
-            let mut new_dir = if let Some(node) = curr_dir.contains_mut(file) {
+        let mut curr_dir = match self
+            .root
+            .as_ref()
+            .borrow_mut()
+            .contains_dir(split_path.first().unwrap())
+        {
+            None => return None,
+            Some(dir) => dir,
+        };
+
+        for file in split_path[1..split_path.len() - 1].iter() {
+            let new_dir = if let Some(node) = curr_dir
+                .borrow_mut()
+                .as_dir()
+                .and_then(|d| d.contains_mut(file))
+            {
                 match *node.borrow() {
-                    Node::Dir(_) => node,
+                    Node::Dir(_) => node.clone(),
                     Node::File(_) => return None,
                 }
             } else {
                 return None;
             };
 
-            curr_dir = new_dir.as_ref().borrow_mut();
+            curr_dir = new_dir;
         }
 
         if let Some(p) = split_path.last() {
-            if let Some(f) = curr_dir.contains_mut(p) {
-                return match *f.borrow_mut() {
-                    Node::File(f) => Some(f.into()),
+            if let Some(file) = curr_dir
+                .borrow_mut()
+                .as_dir()
+                .and_then(|d| d.contains_mut(p))
+            {
+                return match *file.borrow() {
+                    Node::File(_) => Some(file.clone()),
                     _ => None,
                 };
             }
@@ -544,8 +551,7 @@ impl FileSystem {
             final_queries.push((final_query, false));
         }
 
-        let nodes = self.root.query(&mut final_queries);
-        dbg!(final_queries.clone());
+        let nodes = self.root.borrow_mut().query(&mut final_queries);
 
         result.nodes = nodes;
         result.queries = final_queries
@@ -561,7 +567,7 @@ impl FileSystem {
 #[cfg(test)]
 mod test {
 
-    use crate::{File, FileSystem, MatchResult, Node};
+    use crate::{File, FileSystem, Node};
 
     #[test]
     fn new_test() {
@@ -689,39 +695,31 @@ mod test {
 
     #[test]
     fn search_test() {
-        // let mut file = FileSystem::new();
-        // let mut a =
-        //     File {
-        //         name: "a".into(),
-        //         ..Default::default()
-        //     };
-        // file.new_file(
-        //     "/",
-        //     a.clone(),
-        // );
-        // file.mk_dir("/b");
-        // file.mk_dir("/b/c");
-        // file.mk_dir("/b/d");
-        // let mut o =
-        //     File {
-        //         name: "o".into(),
-        //         ..Default::default()
-        //     };
+        let mut file = FileSystem::new();
+        file.new_file(
+            "/",
+            File {
+                name: "a".into(),
+                ..Default::default()
+            },
+        );
+        file.mk_dir("/b");
+        file.mk_dir("/b/c");
+        file.mk_dir("/b/d");
+        file.mk_dir("/b/c/a");
+        file.new_file(
+            "/b/d",
+            File {
+                name: "o".into(),
+                ..Default::default()
+            },
+        );
 
-        // file.new_file(
-        //     "/b/d",
-        //     o.clone()
-        // );
+        let matches = file
+            .search(&["name:a", "name:f", "name:o", "smaller:32"])
+            .unwrap();
 
-        // println!("{:#?}", file);
-
-        // let mut other = file.clone();
-        // let mut a = Node::File(a);
-        // let mut o = Node::File(o);
-        // let res = MatchResult {
-        //     queries: vec!["name:a", "name:o", "smaller:32"],
-        //     nodes: vec![&mut a, &mut o],
-        // };
-        // assert_eq!(Some(res), file.search(&["name:a", "name:f", "name:o", "smaller:32"]));
+        assert_eq!(matches.queries.len(), 3);
+        assert_eq!(matches.nodes.len(), 3);
     }
 }

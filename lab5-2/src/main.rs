@@ -1,9 +1,7 @@
 use std::{
-    ffi::OsString,
-    io::{stdin, stdout, BufRead, BufReader, Read, Write},
-    os::unix::prelude::OsStrExt,
+    io::{stdin, stdout, BufRead, BufReader, Write},
     process::{Command, Stdio},
-    thread, vec,
+    thread,
 };
 
 use crossbeam::channel::{Receiver, Sender};
@@ -49,9 +47,19 @@ fn handle_child(
             .unwrap();
 
         let child_stdout = child.stdout.take().unwrap();
+        let mut child_stdin = child.stdin.take().unwrap();
         let mut child_reader = BufReader::new(child_stdout);
 
         loop {
+            let console = child_console_rx.try_recv().unwrap_or(String::new());
+            if let Some(1) = console.as_bytes().first() {
+                child.kill().unwrap();
+                break;
+            }
+
+            println!("Child: {:?}", console);
+
+            child_stdin.write_all(console.as_bytes()).unwrap();
             let mut output = String::new();
             let bytes = child_reader.read_line(&mut output).unwrap();
 
@@ -62,19 +70,6 @@ fn handle_child(
             }
 
             child_sx.send((ChildState::Working, output)).unwrap();
-
-            let console = child_console_rx.try_recv().unwrap_or(String::new());
-            if let Some(1) = console.as_bytes().first() {
-                child.kill().unwrap();
-                break;
-            }
-
-            child
-                .stdin
-                .as_mut()
-                .unwrap()
-                .write_all(console.as_bytes())
-                .unwrap();
         }
     }
 }
@@ -109,7 +104,9 @@ fn main_event_loop(event: EventLoop) {
                 recv(event.console_rx) -> line => (LineFrom::Console, (ChildState::Working, line.unwrap())),
             };
 
-            if let ChildState::Killed = output.0 { state = LoopState::Prompting; }
+            if let ChildState::Killed = output.0 {
+                state = LoopState::Prompting;
+            }
 
             match from {
                 LineFrom::Console => event.child_sx.send(output.1).unwrap(),

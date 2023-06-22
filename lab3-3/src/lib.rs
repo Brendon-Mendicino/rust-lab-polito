@@ -411,7 +411,7 @@ impl FileSystem {
         }
     }
 
-    pub fn from_dir(path: &str) {}
+    pub fn from_dir(_path: &str) {}
 
     pub fn mk_dir(&mut self, path: &str) {
         let iter = &mut path.split("/").peekable();

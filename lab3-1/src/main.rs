@@ -70,7 +70,7 @@ fn main() {
                     };
 
                     for numbers in &number_permutations.as_slice()[thead_range] {
-                        let operation_comb = permutations_with_replacement(&ops, len - 1);
+                        let operation_comb = permutations_with_replacement(ops, len - 1);
 
                         for ops in operation_comb {
                             if let Some(10) = calculate(numbers, &ops) {
